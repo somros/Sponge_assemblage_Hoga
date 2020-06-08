@@ -1,0 +1,506 @@
+---
+title: "Sponge assemblage: biodiversity linear mixed effects models"
+author: "Alberto Rovellini"
+date: "22 November 2018"
+output:
+  html_document:
+    code_folding: hide
+    toc: yes
+    toc_float: yes
+  pdf_document:
+    toc: yes
+---
+
+```{r, echo = FALSE, include=FALSE, warning = FALSE}
+knitr::opts_chunk$set(echo = TRUE, width = 150)
+```
+
+```{r, message = FALSE, warning = FALSE}
+
+library(abind)
+library(plyr)
+library(ggplot2)
+library(reshape2)
+library(BiodiversityR)
+library(ggvegan)
+library(dplyr)
+library(nlme)
+library(effects)
+
+```
+
+Read-in data.
+
+```{r}
+
+dataAllYears <- read.csv("//Staff/Home/SCIFAC/rovellal/DocumentsRedir//Projects/Chapter1/analysis/dataAllYears.csv")
+
+names(dataAllYears) <- substr(names(dataAllYears), 2, nchar(names(dataAllYears)))
+
+```
+
+Set up functions to calculate evenness, richness and diversity of the assemblage.
+
+```{r}
+
+# let's find out what the evenness is doing here, and then model it against the abundance
+
+# species richness here, or number of species
+
+richness <- function(x) {
+  R <- sum(x != 0)
+  return(R)
+}
+
+# Shannon's index
+
+shannons.diversity <- function(x) {
+  S <- sum(x != 0) # numer of species in the quadrat, only non-zeroes (required! we don't deal with "hypothetical" species!)
+  total.inds <- sum(x) # total sponge number
+  non.zero <- x[x != 0]
+  rel.abs <- non.zero/total.inds # relative abundances for each species
+  H <- -sum(rel.abs*log(rel.abs)) # Shannon-Wiener's index
+  return(H)
+}
+
+simpsons.evenness <- function(x) {
+  S <- sum(x != 0) # numer of species in the quadrat, only non-zeroes (required! we don't deal with "hypothetical" species!)
+  total.inds <- sum(x) # total sponge number
+  rel.abs <- x/total.inds # relative abundances for each species
+  D <- sum(rel.abs^2) # simpson's diversity
+  E <- 1/(D*S) # simpson's evenness
+  return(E)
+}
+
+# apply to data
+
+richness.vector <- apply(dataAllYears, 2, richness)
+diversity.vector <- apply(dataAllYears, 2, shannons.diversity)
+evenness.vector <- apply(dataAllYears, 2, simpsons.evenness)
+
+# melt for plotting
+
+melt.evenness <- melt(evenness.vector, value.name = "Evenness")
+index <- rownames(melt.evenness)
+melt.evenness$Year <- as.numeric(substr(index, 1, 2))
+melt.evenness$Site <- substr(index, 3, 4)
+melt.evenness$Quadrat <- substr(index, nchar(index), nchar(index))  
+melt.evenness$QuadratSite <- substr(index, nchar(index)-1, nchar(index))
+melt.evenness$Richness <- melt(richness.vector, value.name = "Richness")[,1]
+melt.evenness$Diversity <- melt(diversity.vector, value.name = "Diversity")[,1]
+
+# bring in the total data
+
+melt.evenness$Sponges <- melt(colSums(dataAllYears), value.name = "Sponges")[,1]
+
+# adjust class of columns
+
+melt.evenness$Site <- factor(melt.evenness$Site)
+melt.evenness$Quadrat <- factor(melt.evenness$Quadrat )
+melt.evenness$QuadratSite <- factor(melt.evenness$QuadratSite)
+
+glimpse(melt.evenness)
+
+```
+
+## Mean values of biodiversity metrics
+
+```{r}
+
+biodiversity <- melt.evenness %>% group_by(
+  Year
+) %>% dplyr::summarize(
+  Rich    = mean(Richness),
+  Even    = mean(Evenness),
+  Div     = mean(Diversity),
+  Num     = mean(Sponges),
+  Rich.SE = sd(Richness)/sqrt(length(Richness)),
+  Even.SE = sd(Evenness)/sqrt(length(Evenness)),
+  Div.SE  = sd (Diversity)/sqrt(length(Diversity)),
+  Num.SE  = sd(Sponges)/sqrt(length(Sponges))
+)
+
+# make 2 one for means and one for errors (needed for melting later)
+
+means <- biodiversity %>% dplyr::select(
+  Year:Num
+)
+
+errors <- biodiversity %>% dplyr::select(
+  Year, Rich.SE:Num.SE
+)
+
+# melt them
+
+mean.div.plot <- melt(means, id.vars = "Year")
+se.div.plot <- melt(errors, id.vars = "Year")
+
+# bind them
+
+plot.biodiversity <- cbind(mean.div.plot, se.div.plot[,ncol(se.div.plot)])
+
+names(plot.biodiversity) <- c("year", "variable", "value", "SE") 
+
+```
+
+```{r}
+
+mp <- ggplot(data = plot.biodiversity, aes(x = year, y = value, group = variable))+
+  geom_point()+
+  geom_line()+
+  geom_errorbar(ymin = plot.biodiversity$value - plot.biodiversity$SE,
+                ymax = plot.biodiversity$value + plot.biodiversity$SE)+
+  facet_wrap(~ variable, scales = "free_y")
+mp
+
+```
+
+
+
+## Linear models for biodiversity metrics. Using LMM here and quadrats as random factor.
+
+### Richness
+
+```{r, fig.width = 11, fig.height = 3.5}
+
+null.rich <- nlme::lme(Richness ~ 1, 
+                       random = ~ 1 | QuadratSite, 
+                       data = melt.evenness, 
+                       correlation = corCAR1(form = ~ Year | QuadratSite), 
+                       method = "ML") # intercept model
+
+sponge.rich <- update(null.rich, . ~ . + Sponges) # only sponges
+site.rich <- update(null.rich, . ~ . + Site)
+add.rich <- update(sponge.rich, . ~ . + Site)
+all.rich <- update(add.rich, . ~ . + Sponges * Site)
+
+# Backwards selection
+
+anova(all.rich, add.rich) # interaction significant, P = 2e-04
+anova(add.rich, site.rich) # sponges alone significant, P <.0001
+anova(add.rich, sponge.rich) # site alone significant, P = 0.003
+
+# fit variance structure
+
+all.rich.var <- update(all.rich, weights = varIdent(form = ~ 1 | QuadratSite))
+
+# re-fit final model with REML
+
+rich.model <- update(all.rich.var, method = "REML")
+
+summary(rich.model)
+
+# Phi = 0.4403058
+
+jpeg("//Staff/Home/SCIFAC/rovellal/DocumentsRedir/Projects/Defense/residuals/Ch3_LMM_S_Site_Year_SiteYear.jpeg", width = 11, height = 3.5, units = "in", res = 300) 
+par(mfrow = c(1, 3))
+plot(resid(rich.model, type = "normalized"))
+hist(residuals(rich.model, type = "normalized"))
+qqnorm(residuals(rich.model, type = "normalized"))
+qqline(residuals(rich.model, type = "normalized")) # might be slightly skewed
+dev.off()
+
+
+```
+
+### Diversity
+
+```{r, fig.width = 12, fig.height = 5}
+
+null.div <- nlme::lme(Diversity ~ 1, 
+                       random = ~ 1 | QuadratSite, 
+                       data = melt.evenness, 
+                       correlation = corCAR1(form = ~ Year | QuadratSite), 
+                       method = "ML") # intercept model
+
+sponge.div <- update(null.div, . ~ . + Sponges) # only sponges
+site.div <- update(null.div, . ~ . + Site)
+add.div <- update(sponge.div, . ~ . + Site)
+all.div <- update(add.div, . ~ . + Sponges * Site)
+
+# Backwards selection
+
+anova(all.div, add.div) # interaction significant, P = 0.05
+anova(add.div, site.div) # sponges alone not significant, P = 0.9866
+anova(add.div, sponge.div) # site alone significant, P = 0.0019
+
+# fit variance structure
+
+all.div.var <- update(all.div, weights = varIdent(form = ~ 1 | QuadratSite))
+
+# re-fit final model with REML
+
+div.model <- update(all.div.var, method = "REML")
+
+summary(div.model)
+
+# Phi = 0.3541138
+
+jpeg("//Staff/Home/SCIFAC/rovellal/DocumentsRedir/Projects/Defense/residuals/Ch3_LMM_H_Site_Year_SiteYear.jpeg", width = 11, height = 3.5, units = "in", res = 300) 
+par(mfrow = c(1, 3))
+plot(resid(div.model, type = "normalized"))
+hist(residuals(div.model, type = "normalized"))
+qqnorm(residuals(div.model, type = "normalized"))
+qqline(residuals(div.model, type = "normalized"))
+dev.off()
+
+```
+
+### Evenness
+
+```{r, fig.width = 12, fig.height = 5}
+
+null.even <- nlme::lme(Evenness ~ 1, 
+                       random = ~ 1 | QuadratSite, 
+                       data = melt.evenness, 
+                       correlation = corCAR1(form = ~ Year | QuadratSite), 
+                       method = "ML") # intercept model
+
+sponge.even <- update(null.even, . ~ . + Sponges) # only sponges
+site.even <- update(null.even, . ~ . + Site)
+add.even <- update(sponge.even, . ~ . + Site)
+all.even <- update(add.even, . ~ . + Sponges * Site)
+
+# Backwards selection
+
+anova(all.even, add.even) # interaction significant, P = 0.002
+anova(add.even, site.even) # sponges alone significant, P <.0001
+anova(add.even, sponge.even) # site alone not significant, P = 0.1471
+
+# fit variance structure
+
+all.even.var <- update(all.even, weights = varIdent(form = ~ 1 | QuadratSite))
+
+# re-fit final model with REML
+
+even.model <- update(all.even.var, method = "REML")
+
+summary(even.model)
+
+# Phi = 0.4132287
+
+jpeg("//Staff/Home/SCIFAC/rovellal/DocumentsRedir/Projects/Defense/residuals/Ch3_LMM_D_Site_Year_SiteYear.jpeg", width = 11, height = 3.5, units = "in", res = 300) 
+par(mfrow = c(1, 3))
+plot(resid(even.model, type = "normalized"))
+hist(residuals(even.model, type = "normalized"))
+qqnorm(residuals(even.model, type = "normalized"))
+qqline(residuals(even.model, type = "normalized")) # one outlier
+dev.off()
+
+```
+
+The models above seem to have rather good fits. We may attempt to fit an LMM if we think that we must take into account quadrat as a random factor. Be prepared for very different fits though.
+
+## Effects
+
+### Richness
+
+```{r, fig.width = 7.5, fig.height = 2.8}
+
+ef.richness <- data.frame(effect("Sponges * Site", rich.model,  xlevel = 10))
+
+ef.rich.plot <- ggplot()+
+  geom_point(data = melt.evenness, aes(x = Sponges, y = Richness, shape = Quadrat), alpha = .3)+
+  geom_line(data = ef.richness, aes(x = Sponges, y = fit), color = "royalblue", size = .9)+
+  geom_line(data = ef.richness, aes(x = Sponges, y = lower), linetype = "dashed", color = "black", size = .5)+
+  geom_line(data = ef.richness, aes(x = Sponges, y = upper), linetype = "dashed", color = "black", size = .5)+
+  scale_x_continuous(breaks = seq(0 ,350, 50), limits = c(0, 320))+
+  theme_bw()+
+  labs(x = expression(paste(Sponge~abundance~(individuals~m^-2))), y = expression(italic(S)))+
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor.y = element_blank())+
+  facet_grid(~ Site)+
+  theme(strip.text.x = element_blank(), strip.background = element_blank())
+ef.rich.plot
+
+ggsave("//Staff/Home/SCIFAC/rovellal/DocumentsRedir/Projects/Chapter1/analysis/newpics/richnessEffect.pdf",
+       ef.rich.plot, useDingbats = T, width = 8, height = 2.7)
+  
+```
+
+### Diversity
+
+```{r, fig.width = 7.5, fig.height = 2.8}
+
+ef.diversity <- data.frame(Effect(c("Sponges", "Site"), div.model,  xlevel = 10))
+
+ef.div.plot <- ggplot()+
+  geom_point(data = melt.evenness, aes(x = Sponges, y = Diversity, shape = Quadrat), alpha = .3)+
+  geom_line(data = ef.diversity, aes(x = Sponges, y = fit), color = "royalblue", size = .9)+
+  geom_line(data = ef.diversity, aes(x = Sponges, y = lower), linetype = "dashed", color = "black", size = .5)+
+  geom_line(data = ef.diversity, aes(x = Sponges, y = upper), linetype = "dashed", color = "black", size = .5)+
+  scale_x_continuous(breaks = seq(0 ,350, 50), limits = c(0, 320))+
+  labs(x = expression(paste(Sponge~abundance~(individuals~m^-2))), y = expression(italic(H)))+
+  theme_bw()+
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor.y = element_blank())+
+  facet_grid(~ Site)+
+  theme(strip.text.x = element_blank(), strip.background = element_blank())
+ef.div.plot
+
+ggsave("//Staff/Home/SCIFAC/rovellal/DocumentsRedir/Projects/Chapter1/analysis/newpics/diversityEffect.pdf",
+       ef.div.plot, useDingbats = T, width = 8, height = 2.7)
+  
+```
+
+### Evenness
+
+```{r, fig.width = 7.5, fig.height = 2.8}
+
+ef.evenness <- data.frame(effect("Sponges * Site", even.model,  xlevel = 10))
+
+ef.even.plot <- ggplot()+
+  geom_point(data = melt.evenness, aes(x = Sponges, y = Evenness, shape = Quadrat), alpha = .3)+
+  geom_line(data = ef.evenness, aes(x = Sponges, y = fit), color = "royalblue", size = .9)+
+  geom_line(data = ef.evenness, aes(x = Sponges, y = lower), linetype = "dashed", color = "black", size = .5)+
+  geom_line(data = ef.evenness, aes(x = Sponges, y = upper), linetype = "dashed", color = "black", size = .5)+
+  scale_x_continuous(breaks = seq(0 ,350, 50), limits = c(0, 320))+
+  scale_y_continuous(breaks = seq(0 ,1, 0.2), limits = c(0, 1))+
+  labs(x = expression(paste(Sponge~abundance~(individuals~m^-2))), y = expression(italic(E[1/D])))+
+  theme_bw()+
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor.y = element_blank())+
+  facet_grid(~ Site)+
+  theme(strip.text.x = element_blank(), strip.background = element_blank())
+ef.even.plot
+
+ggsave("//Staff/Home/SCIFAC/rovellal/DocumentsRedir/Projects/Chapter1/analysis/newpics/evennessEffect.pdf",
+       ef.even.plot, useDingbats = T, width = 8, height = 2.7)
+  
+```
+
+Intervals above are 95% confidence intervals on the population parameters, i.e. they are not predition intervals. That is why they do not cover the scatter of the points.
+
+## Biodiversity metrics in time.
+
+```{r, fig.width = 7.5, fig.height = 2.8}
+
+ten <- data.frame(rep(NA, 15), rep(10, 15), melt.evenness[melt.evenness$Year == 5, 3:5], 
+                  rep(NA, 15), rep(NA, 15),rep(NA, 15))
+twelve <- data.frame(rep(NA, 15), rep(12, 15), melt.evenness[melt.evenness$Year == 5, 3:5], 
+                     rep(NA, 15), rep(NA, 15),rep(NA, 15))
+
+# rename columns
+
+names(ten) <- colnames(melt.evenness)
+names(twelve) <- colnames(melt.evenness)
+
+# bind it all together
+
+evenness.gaps <- rbind.data.frame(melt.evenness[melt.evenness$Year %in% 5:9,],
+                                  ten,
+                                  melt.evenness[melt.evenness$Year == 11,],
+                                  twelve,
+                                  melt.evenness[melt.evenness$Year %in% 13:17,])
+
+
+```
+
+### Richness
+
+```{r, fig.width = 7.5, fig.height = 2.8}
+
+points.richness <- ggplot(data = evenness.gaps, aes(x = Year, y = Richness))+
+  geom_line(aes(color = Quadrat), size = .75)+
+  geom_point(aes(shape = Quadrat, color = Quadrat), size =2)+
+  scale_color_grey(start = 0, end = .7)+
+  scale_x_continuous(breaks = seq(5,17,1),
+                     labels = seq(2005,2017,1),
+                     limits = c(5,17))+
+  scale_y_continuous(limits = c(0,35),
+                     breaks = seq(0,35,5))+
+  labs(x= "Year",
+       y = "S")+
+  theme_bw()+
+  theme(panel.grid.minor = element_blank(), 
+        panel.grid.major = element_blank())+
+  theme(plot.title = element_text(size=14, vjust=2))+
+  theme(axis.title.x = element_text(size=10,vjust=-0.5),
+        axis.title.y = element_text(size=10,vjust=0.5))+
+  theme(axis.text.x=element_text(size=10, angle = 60, 
+                                 hjust = 1, vjust = .9))+
+  theme(axis.text.y=element_text(size=10))+
+  facet_grid(. ~ Site, scales = "free")+
+  theme(strip.text.x = element_blank(), strip.background = element_blank())
+points.richness
+
+# ggsave("//Staff/Home/SCIFAC/rovellal/DocumentsRedir/Projects/Chapter 1/pics/richnessDynamics.pdf",
+#        points.richness, useDingbats = T, width = 8, height = 3.5)
+
+```
+
+### Evenness
+
+```{r, fig.width = 7.5, fig.height = 2.8}
+
+points.evenness <- ggplot(data = evenness.gaps, aes(x = Year, y = Evenness))+
+  geom_line(aes(color = Quadrat), size = .75)+
+  geom_point(aes(shape = Quadrat, color = Quadrat), size =2)+
+  scale_color_grey(start = 0, end = .7)+
+  scale_x_continuous(breaks = seq(5,17,1),
+                     labels = seq(2005,2017,1),
+                     limits = c(5,17))+
+  scale_y_continuous(limits = c(0,1),
+                     breaks = seq(0,1,.2))+
+  labs(x= "Year",
+       y = expression(paste(E[1/D])))+
+  theme_bw()+
+  theme(panel.grid.minor = element_blank(), 
+        panel.grid.major = element_blank())+
+  theme(plot.title = element_text(size=14, vjust=2))+
+  theme(axis.title.x = element_text(size=10,vjust=-0.5),
+        axis.title.y = element_text(size=10,vjust=0.5))+
+  theme(axis.text.x=element_text(size=10, angle = 60, 
+                                 hjust = 1, vjust = .9))+
+  theme(axis.text.y=element_text(size=10))+
+  facet_grid(. ~ Site, scales = "free")+
+  theme(strip.text.x = element_blank(), strip.background = element_blank())
+points.evenness
+
+# ggsave("//Staff/Home/SCIFAC/rovellal/DocumentsRedir/Projects/Chapter 1/pics/evennessDynamics.pdf",
+#        points.evenness, useDingbats = T, width = 8, height = 3.5)
+
+```
+
+### Diversity
+
+```{r, fig.width = 7.5, fig.height = 2.8}
+
+points.diversity <- ggplot(data = evenness.gaps, aes(x = Year, y = Diversity))+
+  geom_line(aes(color = Quadrat), size = .75)+
+  geom_point(aes(shape = Quadrat, color = Quadrat), size =2)+
+  scale_color_grey(start = 0, end = .7)+
+  scale_x_continuous(breaks = seq(5,17,1),
+                     labels = seq(2005,2017,1),
+                     limits = c(5,17))+
+  scale_y_continuous(limits = c(0,3),
+                     breaks = seq(0,3,.5))+
+  labs(x= "Year",
+       y = expression(paste(E[1/D])))+
+  theme_bw()+
+  theme(panel.grid.minor = element_blank(), 
+        panel.grid.major = element_blank())+
+  theme(plot.title = element_text(size=14, vjust=2))+
+  theme(axis.title.x = element_text(size=10,vjust=-0.5),
+        axis.title.y = element_text(size=10,vjust=0.5))+
+  theme(axis.text.x=element_text(size=10, angle = 60, 
+                                 hjust = 1, vjust = .9))+
+  theme(axis.text.y=element_text(size=10))+
+  facet_grid(. ~ Site, scales = "free")+
+  theme(strip.text.x = element_blank(), strip.background = element_blank())
+points.diversity
+
+# ggsave("//Staff/Home/SCIFAC/rovellal/DocumentsRedir/Projects/Chapter 1/pics/diversityDynamics.pdf",
+#        points.diversity, useDingbats = T, width = 8, height = 3.5)
+
+```
+

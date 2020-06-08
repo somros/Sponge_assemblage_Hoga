@@ -1,0 +1,375 @@
+---
+title: "Effect of SST and SSTANOM on sponge density and growth"
+author: "Alberto Rovellini"
+date: "4 February 2019"
+output: html_document
+output:
+  html_document:
+    code_folding: hide
+    toc: yes
+    toc_float: yes
+  pdf_document:
+    toc: yes
+---
+
+Script to plot the SST data from Coral Reef Watch (NOAA), from 2001 to 2019. Selected station is Wakatobi (see http://coralreefwatch.noaa.gov/satellite/vs/docs/list_vs_group_latlon_201103.php). For information about the dataset, see "description.txt", or also http://coralreefwatch.noaa.gov/satellite/data_nrt/descriptions/timeseries.txt.
+
+We do not expect a detectable effect of sea surface temperature on the sponge assemblage at this site, because:
+1. The site is relatively deep (10m).
+2. There is no evident effect effect of temperature on other components of the reef at this specific site and depth.
+3. The region has not been hit by extreme heating events like the GBR did.
+
+Most importantly, there is going to be a mismatch in the resolution of stellite data and the data collected at this site. The mismatch is both spatial (small scale for the sponge data, large scale for satellite data) and temporal (sampling once a year for sponge data, sampling every 2-3 days for satellite data, thus requiring averagig).
+
+```{r, echo = FALSE, include=FALSE, warning = FALSE}
+
+knitr::opts_chunk$set(echo = TRUE, width = 150)
+
+```
+
+```{r, message = FALSE, warning = FALSE}
+
+require(ggplot2)
+require(abind)
+require(plyr)
+require(lubridate)
+require(dplyr)
+require(nlme)
+
+```
+
+# Surface temperature satellite data in the Wakatobi
+
+Read in satellite data, write julian day into the dataset.
+
+```{r}
+
+dataSet <- read.table("//Staff/Home/SCIFAC/rovellal/DocumentsRedir/Projects/Chapter1/analysis/wakatobi_SST_2019.txt", 
+                      header = T, sep = "", dec = ".")
+days <- seq(as.Date("2000/11/28"), as.Date("2017/12/31"), "days")
+julianDays <- yday(days)
+
+# create a new column in the data set with the correct format of the days to match with progs
+
+myDays <- list()
+for (i in 1:nrow(dataSet)) {
+myDays[[i]] <- paste(dataSet$BYYY[i],
+                if (nchar(dataSet$BM[i]) == 2) {
+                  dataSet$BM[i]
+                } else {
+                  paste("0", dataSet$BM[i], sep = "")
+                }, 
+                if (nchar(dataSet$BD[i]) == 2) {
+                  dataSet$BD[i]
+                } else {
+                  paste("0", dataSet$BD[i], sep = "")
+                } , sep = "-")
+}
+
+myDays <- unlist(myDays)
+
+# now need to associate the progressive number of the days to my dataSet
+# could use match from column of data frame to vector of dates to see the position apparently
+
+indexDay <- match(myDays, as.character(days))
+
+# now extract from the julianDays vector the elements indexed according to indexDay
+
+julians <- julianDays[indexDay]
+trueDates <- as.Date(days[indexDay])
+
+dataSet$Julian <- julians
+dataSet$Date <- trueDates
+
+```
+
+Plot SST
+
+```{r}
+
+myYears <- 2005:2017
+months <- c("J","F","M","A","M","J","J","A","S","O","N","D")
+yearsOfInterest <- dataSet[dataSet$BYYY %in% myYears,]
+
+allTemp <- ggplot(data = yearsOfInterest, 
+                  aes(x=Julian, y=SST, group = BYYY))+
+  geom_line()+
+  scale_x_continuous(breaks = seq(15, 365, 30),
+                     labels = months)+
+  labs(y = "SST (°C)")+
+  theme_bw()+
+  theme(panel.grid.minor = element_blank())+
+  theme(plot.title = element_text(size=14, vjust=2))+
+  theme(axis.title.x = element_text(size=10,vjust=-0.5),
+        axis.title.y = element_text(size=10,vjust=0.5))+
+  theme(axis.text.x=element_text(size=10))+
+  theme(axis.text.y=element_text(size=10))+
+  facet_wrap(~ BYYY)
+allTemp
+
+ggsave("//Staff/Home/SCIFAC/rovellal/DocumentsRedir/Projects/Chapter1/analysis/newpics/SSTall.pdf",
+       allTemp, useDingbats = T, width = 8.5, height = 7)
+
+```
+
+Plot anomalies. Anomalies are calculated as recorded SST - daily climatology. for incormation about the calculation of the latter, refer to http://coralreefwatch.noaa.gov/satellite/methodology/methodology.php#clim
+
+```{r}
+
+anomalies <- ggplot(data = yearsOfInterest,
+                    aes(x = Julian, y = SSTANOM))+
+  geom_bar(stat = "identity")+
+  geom_hline(yintercept=0, col="red")+
+  scale_x_continuous(breaks = seq(15, 365, 30),
+                     labels = months)+ # approximation to visualise
+  labs(y = "SSTANOM (°C)")+
+  theme_bw()+
+  theme(panel.grid.minor = element_blank())+
+  theme(plot.title = element_text(size=14, vjust=2))+
+  theme(axis.title.x = element_text(size=10,vjust=-0.5),
+        axis.title.y = element_text(size=10,vjust=0.5))+
+  theme(axis.text.x=element_text(size=10))+
+  theme(axis.text.y=element_text(size=10))+
+  facet_wrap(~ BYYY)
+
+anomalies
+
+ggsave("//Staff/Home/SCIFAC/rovellal/DocumentsRedir/Projects/Chapter1/analysis/newpics/SSTANOMall.pdf",
+       anomalies, useDingbats = T, width = 8.5, height = 7)
+
+```
+
+Decompose time series
+
+```{r, fig.height=7, fig.width=9}
+
+library(ggfortify)
+
+freqs <- yearsOfInterest %>% group_by(
+  BYYY
+) %>% summarise(
+  freqs = length(EYYY)
+)
+
+# variable for different years, take an average
+
+mean(freqs$freqs)
+
+sst <- ts(yearsOfInterest$SST, frequency = 105)
+sstanom <- ts(yearsOfInterest$SSTANOM, frequency = 105)
+
+dec.sst <- decompose(sst, "additive")
+dec.sstanom <- decompose(sstanom, "additive")
+
+# plot
+
+dec.SST.plot <- autoplot(dec.sst)+
+  scale_x_continuous(breaks = 1:13, labels = 2005:2017)+
+  theme_bw()+
+  theme(panel.grid.minor = element_blank())+
+  theme(plot.title = element_text(size=14, vjust=2))+
+  theme(axis.title.x = element_text(size=10,vjust=-0.5),
+        axis.title.y = element_text(size=10,vjust=0.5))+
+  theme(axis.text.x=element_text(size=10))+
+  theme(axis.text.y=element_text(size=10))
+
+ggsave("//Staff/Home/SCIFAC/rovellal/DocumentsRedir/Projects/Chapter1/analysis/newpics/decSSTplot.pdf",
+       dec.SST.plot, useDingbats = T, width = 8.5, height = 6)
+
+# plot
+
+dec.SSTANOM.plot <- autoplot(dec.sstanom)+
+  scale_x_continuous(breaks = 1:13, labels = 2005:2017)+
+  theme_bw()+
+  theme(panel.grid.minor = element_blank())+
+  theme(plot.title = element_text(size=14, vjust=2))+
+  theme(axis.title.x = element_text(size=10,vjust=-0.5),
+        axis.title.y = element_text(size=10,vjust=0.5))+
+  theme(axis.text.x=element_text(size=10))+
+  theme(axis.text.y=element_text(size=10))
+
+ggsave("//Staff/Home/SCIFAC/rovellal/DocumentsRedir/Projects/Chapter1/analysis/newpics/decSSTANOMplot.pdf",
+       dec.SSTANOM.plot, useDingbats = T, width = 8.5, height = 6)
+  
+
+# pdf("//Staff/Home/SCIFAC/rovellal/DocumentsRedir/Projects/Chapter1/analysis/newpics/decomposedSST.pdf", width = 11, height = 8)
+# plot(dec.sst, xaxt="n")
+# axis(1, at = 1:13, labels = 2005:2017, pos = -1.2)
+# dev.off
+# 
+# pdf("//Staff/Home/SCIFAC/rovellal/DocumentsRedir/Projects/Chapter1/analysis/newpics/decomposedSSTANOM.pdf", width = 11, height = 8)
+# plot(dec.sstanom)
+# axis(1, at = 1:13, labels = 2005:2017, pos = -1)
+# dev.off()
+
+```
+
+
+Monthly means
+
+```{r}
+
+monthlyMeans <- dataSet %>% dplyr::select(
+  BYYY:BM, SST:DHW
+) %>% group_by(BYYY, BM) %>%
+  dplyr::summarise(monthSST = mean(SST),
+            monthSSTANOM = mean(SSTANOM),
+            SSTsd = sd(SST),
+            SSTANOMsd = sd(SSTANOM))
+
+monthlyMeans <- monthlyMeans[monthlyMeans$BYYY %in% 2005:2017,]
+
+# plot
+
+monthPlot <- ggplot(data = monthlyMeans, aes(x = BM, y = monthSST))+
+  geom_point()+
+  geom_line()+
+  geom_errorbar(aes(ymin = monthSST - SSTsd,
+                    ymax = monthSST + SSTsd), width = 0.2)+
+  facet_wrap( ~ BYYY)
+monthPlot
+
+```
+
+# Climatologies
+
+Get climatology for Dec-Jan-Feb-Mar-Apr-May. These are the 6 months prior to the sampling period, and the warmest months too on average in the Wakatobi. 6 months is arbitrary and it determines a mismatch in the datasets, but it is as good as anything else and it can be justified as the warmest months (where we are interested in an effect of temperature it makes sense). Discuss the mismatch in the data resolution (e.g. Ferguson et al. 2017). 
+
+```{r}
+
+myYears <- 2004:2017
+myMonths <- c(12,1:5)
+
+dataSST <- dataSet[dataSet$BYYY %in% myYears & dataSet$BM %in% myMonths,]
+
+head(dataSST)
+
+# set a column with an index to designate the months that have to be pulled together. This is done manually in Excel as faster for the moment
+
+write.csv(dataSST, "//Staff/Home/SCIFAC/rovellal/DocumentsRedir/Projects/Chapter1/analysis/dataSST_for_index_2019.csv")
+
+dataSST <- read.csv("//Staff/Home/SCIFAC/rovellal/DocumentsRedir/Projects/Chapter1/analysis/dataSST_indexed_2019.csv", header = T)
+
+dataSST <- dataSST[complete.cases(dataSST),]
+
+climatologies <- dataSST %>% 
+  dplyr::select(
+  BYYY:IND, SST:DHW
+) %>%
+  dplyr::group_by(IND) %>%
+  dplyr::summarise(ClimSST = mean(SST),
+            ClimSSTANOM = mean(SSTANOM),
+            Year = paste(min(BYYY), max(BYYY), sep = "-"))
+
+# write this out for use with future datasets that require the climatologies
+
+write.csv(climatologies, "//Staff/Home/SCIFAC/rovellal/DocumentsRedir/Projects/Chapter1/analysis/climatologies.csv")
+
+############################################################################
+
+fordata <- climatologies[rep(seq_len(nrow(climatologies)), each = 15),]
+
+```
+
+Read in sponge data.
+
+```{r}
+
+sponge.data <- read.csv("//Staff/Home/SCIFAC/rovellal/DocumentsRedir/Projects/Chapter1/analysis/sponge_data_for_temp_2019.csv")
+
+all.data <- cbind(sponge.data, fordata)
+
+all.data$TotalN1 <- c(all.data$Total[16: nrow(all.data)], rep(NA, 15))
+
+# define growth as percent increase or decline
+
+all.data$Growth <- ((all.data$TotalN1 - all.data$Total) / all.data$Total) * 100
+
+all.data$relYear <- all.data$Year - 5
+
+# the below allows me to use the right climatology for sponge growth. For example, for the growth between 2005-2006 we want to use the climatology of 2005-2006, so we have to skip the first 15 lines
+
+all.data$SSTgrowth <- c(all.data$ClimSST[16: nrow(all.data)], rep(NA, 15))
+all.data$SSTANOMgrowth <- c(all.data$ClimSSTANOM[16: nrow(all.data)], rep(NA, 15))
+
+```
+
+# Model effect of temperature on sponge abundance and growth
+
+```{r}
+
+null.sponge <- nlme::lme(Total ~ 1,
+                         data = all.data,
+                         random = ~ 1 | QuadratSite,
+                         correlation = corCAR1(form = ~ relYear | QuadratSite),
+                         method = "ML",
+                         na.action = na.omit)
+
+site.sponge <- update(null.sponge, . ~ . + Site)
+
+time.sponge <- update(null.sponge, . ~ . + relYear)
+
+SST.sponge <- update(null.sponge, . ~ . + ClimSST)
+
+anom.sponge <- update(null.sponge, . ~ . + ClimSSTANOM)
+
+# couple temperature with site and time etc
+
+SST.site <- update(site.sponge, . ~ . + ClimSST)
+SST.time <- update(time.sponge, . ~ . + ClimSST)
+
+anom.site <- update(site.sponge, . ~ . + ClimSSTANOM)
+anom.time <- update(time.sponge, . ~ . + ClimSSTANOM)
+
+anova(SST.sponge, null.sponge) # 0.4569
+anova(SST.site, site.sponge) # 0.4278
+anova(SST.time, time.sponge) # 0.5867
+
+anova(anom.sponge, null.sponge) # 0.4275
+anova(anom.site, site.sponge) # 0.4
+anova(anom.time, time.sponge) # 0.6879
+
+```
+
+No effect of previous climatology of SST and SSTANOM on the number of sponges each year (example of the comparison: sponge density in 2005 is not affected by SST or SSTANOM averages from December 2004 to May 2005).
+
+Growth now.
+
+```{r}
+
+null.growth <- nlme::lme(Growth ~ 1,
+                         data = all.data,
+                         random = ~ 1 | QuadratSite,
+                         correlation = corCAR1(form = ~ relYear | QuadratSite),
+                         method = "ML",
+                         na.action = na.omit)
+
+site.growth <- update(null.growth, . ~ . + Site)
+
+time.growth <- update(null.growth, . ~ . + relYear)
+
+SST.growth <- update(null.growth, . ~ . + SSTgrowth)
+
+anom.growth <- update(null.growth, . ~ . + SSTANOMgrowth)
+
+# couple temperature with site and time etc
+
+SST.site <- update(site.growth, . ~ . + SSTgrowth)
+SST.time <- update(time.growth, . ~ . + SSTgrowth)
+
+anom.site <- update(site.growth, . ~ . + SSTANOMgrowth)
+anom.time <- update(time.growth, . ~ . + SSTANOMgrowth)
+
+anova(SST.growth, null.growth) # 0.9093
+anova(SST.site, site.growth) # 0.9089
+anova(SST.time, time.growth) # 0.5026
+
+anova(anom.growth, null.growth) # 0.6985
+anova(anom.site, site.growth) # 0.6974
+anova(anom.time, time.growth) # 0.2779
+
+```
+
+No effect of 6-months climatologies on sponge population percent growth. That is: sponge population % growth calculated as ((N1 - N0)/N0)*100 is not affected by SST and SSTANOM Dec-May climatologies between t0 and t1. 
+
+No indication of effects of temperature on sponge density and growth at this reef. We do not expect a strong effect due to stability of temperature at the site (anedoctal and also shown by satellite data), the depth of the sites (10m, perhaps too deep for an effect), the lack of evident effect of temperature on other organisms at these quadrats (from the pictures and anedoctal). We can rule T out as a driver at this site (incorporate into discussion).

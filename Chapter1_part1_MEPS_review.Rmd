@@ -1,0 +1,1128 @@
+---
+title: "Sponge assemblage: dynamics and composition analysis"
+author: "Alberto Rovellini"
+date: "22 November 2018"
+output:
+  html_document:
+    code_folding: hide
+    toc: yes
+    toc_float: yes
+  pdf_document:
+    toc: yes
+---
+
+Analysis of the sponge assemblage at Buoy 3, Hoga, Wakatobi Marine Park, Indonesia. Starting dataset is sponge counts per quadrats (square meter) from 2005 to 2017 (ongoing). Two years are missing (2010, 2012). Sampling desing is as follows: vertical wall on a pristine (or at least not impacted) reef. Three replicate sites, A, B, C. Sites do not recruit from each other. In each site, 5 quadrats.
+
+This documents does:
+
+1. Calculation and visualization of total sponge assemblage dynamics
+2. Assemblage composition analysis with ordination methods (nMDS, CAP and PERMANOVA)
+
+```{r, echo = FALSE, include=FALSE, warning = FALSE}
+knitr::opts_chunk$set(echo = TRUE, width = 150)
+```
+
+```{r, message = FALSE, warning = FALSE}
+
+library(abind)
+library(plyr)
+library(ggplot2)
+library(reshape2)
+library(BiodiversityR)
+library(ggvegan)
+library(dplyr)
+library(tibble)
+library(data.table)
+library(nlme)
+
+```
+
+Read-in data and match-up with OTUs key.
+
+```{r}
+
+dataAllYears <- read.csv("//Staff/Home/SCIFAC/rovellal/DocumentsRedir/Projects/Chapter1/analysis/spongeAbundance.csv")
+
+# set flags
+
+flagRoutine <- "average" # can be either "sum" to add the 5 quadrats up, or any other string to take average and sd
+
+# load species list 
+
+species <- read.csv("//Staff/Home/SCIFAC/rovellal/DocumentsRedir/Projects/Chapter1/analysis/speciesKey.csv") # corrected before submission to MEPS
+species[species=="" | species==0] <- NA # drops empty spaces and zeroes
+
+# substitute description to blank fields in the species column (not needed now but keeping for future)
+
+speciesOrDescription <- list()
+
+for (i in 1:nrow(species)) {
+  if (is.na(species[,2][i])==T) {
+    speciesOrDescription[[i]] <- species[,4][i]
+  } else {
+    speciesOrDescription[[i]] <- species[,3][i]
+  }
+}
+speciesOrDescription <- unlist(speciesOrDescription) #
+
+# extract general information about the dataset, to be called later 
+
+years <- levels(factor(substr(names(dataAllYears[-1]),2,3)))
+quadrats <- as.numeric(levels(factor(substr(names(dataAllYears), nchar(names(dataAllYears)), nchar(names(dataAllYears))))))
+quadrats <- quadrats[is.na(quadrats)==F]# number of quadrats per site
+dataColumns <- ncol(dataAllYears)-1 # number of quadrats in all sites in all years, effectively number of columns in the frame
+sites <- c("A", "B", "C")
+
+
+# gets rid of zeros as characters in the datasets
+
+for (i in 1:ncol(dataAllYears)) {
+  if (is.numeric(dataAllYears[,i])==T) {
+    dataAllYears[,i] <- dataAllYears[,i]
+  } else {
+    dataAllYears[,i] <- as.numeric(levels(dataAllYears[,i])[dataAllYears[,i]]) # this removes everything that won't fit as numeric
+  }
+}
+
+dataAllYears[is.na(dataAllYears)] <- 0 # turns NAs to zeroes
+
+# gets rid of the X in front of the column names
+
+colnames(dataAllYears) <- c(names(dataAllYears)[1], substr(names(dataAllYears[,-1]), 2, nchar(names(dataAllYears[,-1]))))
+
+dataAllYears <- dataAllYears[,-1] # run this!
+
+# glimpse(dataAllYears)
+
+# write.csv(dataAllYears, "dataAllYears.csv", row.names = FALSE) # for use with second script
+
+```
+
+# Temporal dynamics of total sponge abundance
+
+```{r}
+
+# transpose to have long format
+
+transData <- as.data.frame(t(dataAllYears))
+
+transData$Total <- rowSums(transData)
+
+# add time and space variables and subset to total numbers
+
+quadratID <- rownames(transData)
+
+transData <- transData %>% mutate(
+  Year        = as.numeric(substr(quadratID, 1, 2)),
+  Site        = substr(quadratID, nchar(quadratID)-1, nchar(quadratID)-1),
+  Quadrat     = substr(quadratID, nchar(quadratID), nchar(quadratID)),  
+  QuadratSite = substr(quadratID, nchar(quadratID)-1, nchar(quadratID))
+) %>% dplyr::select(
+  Total:QuadratSite
+)
+
+# calculate max and min of each plot over the studied period
+
+listOfQuadrats <- split(transData, transData$QuadratSite)
+maxMinQuadrats <- lapply(listOfQuadrats, function(x) {
+  myMax <- max(x$Total)
+  myMin <- min(x$Total)
+  variation <- -(myMax - myMin) * 100 / myMax
+  maxAndMin <- c(myMax, myMin, variation)
+  return(maxAndMin)
+})
+
+maxMinFrame <- as.data.frame(abind(maxMinQuadrats, along = 0))
+
+# fill the frame with fillers for the missing years
+
+ten <- data.frame(rep(NA, 15), rep(10, 15), transData[transData$Year == 5, 3:5])
+twelve <- data.frame(rep(NA, 15), rep(12, 15), transData[transData$Year == 5, 3:5])
+
+# rename their columns accordingly for rbind
+
+colnames(ten) <- names(transData)
+colnames(twelve) <- names(transData)
+
+# stitch them together
+
+smallFrameGaps <- rbind.data.frame(transData[transData$Year %in% 5:9,],
+                                   ten,
+                                   transData[transData$Year == 11,],
+                                   twelve,
+                                   transData[transData$Year %in% 13:17,])
+
+# for SST study called by MEPS
+
+write.csv(smallFrameGaps, "//Staff/Home/SCIFAC/rovellal/DocumentsRedir/Projects/Chapter1/analysis/sponge_data_for_temp_2019.csv", row.names = FALSE)
+
+
+```
+
+```{r, fig.width = 10, fig.height = 4}
+
+quadratsFate <- ggplot(data = smallFrameGaps, aes(x = Year, y = Total, group = QuadratSite, 
+                                                  color = Quadrat))+
+  geom_line(aes(color = Quadrat), size = .75)+
+  geom_point(aes(shape = Quadrat), size =2.5)+
+  scale_color_grey(start = 0, end = .7)+
+  scale_x_continuous(breaks = seq(5,17,1),
+                     labels = seq(2005,2017,1),
+                     limits = c(5,17))+
+  scale_y_continuous(limits = c(0,350),
+                     breaks = seq(0,350,50))+
+  labs(y=expression(paste(Sponge~abundance~(individuals~m^-2))))+
+  theme_bw()+
+  theme(panel.grid.minor = element_blank(), 
+        panel.grid.major = element_blank())+
+  theme(plot.title = element_text(size=14, vjust=2))+
+  theme(axis.title.x = element_text(size=10,vjust=-0.5),
+        axis.title.y = element_text(size=10,vjust=0.5))+
+  theme(axis.text.x=element_text(size=10, angle = 45, 
+                                 hjust = 1, vjust = .9))+
+  theme(axis.text.y=element_text(size=10))+
+  facet_grid(. ~ Site, scales = "free")+
+  theme(strip.text.x = element_blank(), strip.background = element_blank())
+  
+quadratsFate
+
+# ggsave("//Staff/Home/SCIFAC/rovellal/DocumentsRedir/Projects/Chapter 1/pics/dynamics2017.pdf",
+#        quadratsFate, useDingbats = T, width = 9.6, height = 4.5)
+
+```
+
+# Means per site
+
+```{r}
+# new dplyr routine, as the previous one was wrong. No impact on the paper as it affected SE only
+
+transposed.raw <- as.data.frame(t(dataAllYears))
+transposed.raw$Total <- rowSums(transposed.raw) 
+transposed.raw$Year <- as.numeric(substr(rownames(transposed.raw), 1, 2))
+transposed.raw$Site <- substr(rownames(transposed.raw), 4, 4)
+transposed.raw$QuadratSite <- substr(rownames(transposed.raw), 4, 5)
+
+long.t <- melt(transposed.raw, id.vars = list("Year", "Site", "QuadratSite"))
+
+summarised <- long.t %>% dplyr::group_by(
+  variable, Year, Site
+) %>% dplyr::summarise(
+  Mean = mean(value), # get summary stats
+  Sterr = sd(value)/sqrt(5)
+) %>% mutate(
+  upper = Mean + Sterr, # add intervals for plotting
+  lower = Mean - Sterr
+) %>% dplyr::select(
+  variable, Mean, Year, Site, Sterr, upper, lower
+)
+
+totalMeans <- summarised[summarised$variable == "Total",-1]
+
+# fill the frame with fillers for the missing years
+
+ten <- data.frame(rep(NA, 3), rep(10, 3), c("A", "B", "C"), rep(NA, 3), rep(NA, 3), rep(NA, 3))
+twelve <- data.frame(rep(NA, 3), rep(12, 3), c("A", "B", "C"), rep(NA, 3), rep(NA, 3), rep(NA, 3))
+
+# rename their columns accordingly for rbind
+
+colnames(ten) <- names(totalMeans)
+colnames(twelve) <- names(totalMeans)
+
+# stitch them together
+
+smallMeansGaps <- rbind.data.frame(totalMeans, ten, twelve)
+
+# reorder
+
+plotframe <- setorder(smallMeansGaps, Year, Site)
+
+glimpse(plotframe)
+
+# rearrange with SE as column
+
+```
+
+Plotting region
+
+```{r, fig.width = 8, fig.height = 3.5}
+
+meanplot <- ggplot(data = plotframe, aes(x = Year, y = Mean))+
+  geom_point(color = "grey20")+
+  geom_line(color = "grey20")+
+  geom_errorbar(data = plotframe, aes(ymin = lower,
+                ymax = upper), width = 0.2)+
+  scale_x_continuous(breaks = seq(5,17,1),
+                     labels = seq(2005,2017,1),
+                     limits = c(5,17))+
+  scale_y_continuous(limits = c(0,300),
+                     breaks = seq(0,300,50))+
+  labs(y=expression(paste(Sponge~abundance~(sponge~patches~m^-2))))+
+  theme_bw()+
+  theme(panel.grid.minor = element_blank(), 
+        panel.grid.major = element_blank())+
+  theme(plot.title = element_text(size=14, vjust=2))+
+  theme(axis.title.x = element_text(size=10,vjust=-0.5),
+        axis.title.y = element_text(size=10,vjust=0.5))+
+  theme(axis.text.x=element_text(size=10, angle = 45, 
+                                 hjust = 1, vjust = .9))+
+  theme(axis.text.y=element_text(size=10))+
+  facet_grid(. ~ Site, scales = "free")+
+  theme(strip.text.x = element_blank(), strip.background = element_blank())
+meanplot
+
+ggsave("//Staff/Home/SCIFAC/rovellal/DocumentsRedir/Projects/Chapter1/analysis/newpics/meanDynamics2017.pdf",
+        meanplot, useDingbats = T, width = 8, height = 3.5)
+
+```
+
+## Grand mean at the study site (i.e. mean of the 3 sites).
+
+```{r, fig.width = 6, fig.height = 5}
+
+# calculate grand variance for this, after http://www.burtonsys.com/climate/composite_standard_deviations.html
+
+plotframe <- plotframe %>% dplyr::group_by(
+  Year
+  ) %>% dplyr::mutate(
+  GM   = mean(Mean, na.rm = T), # Grand mean per year
+  Var  = (Sterr * sqrt(5))^2, # get variance
+  ESSG = Var * (5-1), # Error Sum of Squares within Group: V(i) * (n(i)-1)
+  GSS  = (Mean - GM)^2 * 5 # Group Sum of Squares
+  ) %>% group_by(
+  Year
+) %>% dplyr::mutate(
+  ESS   = sum(ESSG), # error sum of squares: add ESSG up for all groups year by year
+  TGSS  = sum(GSS), # Get Group sum of Squares
+  GV    = (ESS + TGSS) / (15-1), # N = 15-1 because it calls for total number of observations. This is the Grand Variance
+  GSD   = sqrt(GV),
+  Gupper = GM + GSD, # write intervals for plot
+  Glower = GM - GSD
+) %>% dplyr::ungroup()
+
+glimpse(plotframe)
+
+# note that the above seems to yield the exact same results as taking sd of the 15 datapoints each year
+
+
+
+```
+
+Plot grand mean for Buoy 3.
+
+```{r}
+
+ggplot(data = plotframe, aes(x = Year, y = GM))+
+  geom_point()+
+  geom_line()+
+  geom_errorbar(aes(ymin = Glower, ymax = Gupper), width = 0.2)+
+  scale_x_continuous(breaks = seq(5,17,1),
+                     labels = seq(2005,2017,1),
+                     limits = c(5,17))+
+  scale_y_continuous(limits = c(0,300),
+                     breaks = seq(0,300,50))+
+  labs(y=expression(paste(Sponge~abundance~(individuals~m^-2))))+
+  theme_bw()+
+  theme(panel.grid.minor = element_blank(), 
+        panel.grid.major = element_blank())+
+  theme(plot.title = element_text(size=14, vjust=2))+
+  theme(axis.title.x = element_text(size=10,vjust=-0.5),
+        axis.title.y = element_text(size=10,vjust=0.5))+
+  theme(axis.text.x=element_text(size=10, angle = 45, 
+                                 hjust = 1, vjust = .9))+
+  theme(axis.text.y=element_text(size=10))
+
+```
+
+## Significance of dynamics
+
+1. Is there on average a difference in sponge numbers between time points at the same site? Easy way to do this to get a feeling: beginning, max, low, end. See significance of dynamics. 
+2. Is there a difference between sponge numbers at the same time point but at different sites?
+
+These two can be summarized by an ANOVA of some sort that teases apart within-site and across site variation, but also accounts for the repeated measures. This is technically a mixed-effects model again.
+
+Extract the years of maximum and minimum sponge abundance. These will be used further down for increases and decreases in sponge abundance.
+
+```{r}
+
+tmp <- split(plotframe, plotframe$Site)
+ranges <- unlist(lapply(tmp, function(x) range(x$Mean, na.rm = T)))
+
+
+rangeframe <- plotframe[plotframe$Mean %in% ranges | plotframe$Year %in% c(5, 17),]
+
+rangeframe <- setorder(rangeframe, Site, Year, Mean)
+
+glimpse(rangeframe)
+
+```
+
+Extract percent changes between years, and also between maxima, minima, beginning and end of the sampling period. This is defined as percent change in mean sponge abundance at each site, and at the level of reef as a whole.
+
+```{r}
+
+plotframe$Meant1 <- c(plotframe$Mean[4:nrow(plotframe)], rep(NA, 3))
+
+plotframe <- plotframe %>% mutate(
+  Mean_t1 = c(Mean[4:nrow(plotframe)], rep(NA, 3)),
+  Growth  = ((Meant1 - Mean) / Mean) * 100
+)
+
+# change in sponge abundance between years of interest
+
+rangeframe <- setorder(rangeframe, Year, Site) %>% dplyr::select(
+  Mean:upper) %>% dplyr::mutate(
+    Mean_t1 = c(Mean[4:nrow(rangeframe)], rep(NA, 3)),
+    Growth  = ((Mean_t1 - Mean) / Mean) *100,
+    Range   = c(rep("t0-max", 3), rep("max-min", 3), rep("min-tend", 3), rep(NA, 3))
+  ) %>% dplyr::select(
+    Site, Range, Growth
+  )
+
+rangeframe
+
+print(setorder(rangeframe[complete.cases(rangeframe),], Site))
+
+# repeat the same with means
+
+meanframe <- plotframe %>% dplyr::group_by(
+  Year
+) %>% dplyr::summarise(
+  GM = mean(GM),
+  GSD = mean(GSD),
+  GSE = GSD / sqrt(15) # this is the composite SD divided by the original number of samples per time point. This is an **estimate** of the standard error and may be used for consistency with later parts of the ms that use SE
+) 
+
+startsp <- 1
+maxsp <- which(meanframe$GM == max(meanframe$GM, na.rm = T))
+minsp <- which(meanframe$GM == min(meanframe$GM, na.rm = T))
+endsp <- nrow(meanframe)
+
+rangemean <- meanframe[c(startsp, maxsp, minsp, endsp),] %>% dplyr::mutate(
+  GM_t1 = c(GM[2:4], NA),
+  Growth  = ((GM_t1 - GM) / GM) *100,
+  Range   = c("t0-max", "max-min", "min-tend", NA)
+) 
+
+print(rangemean)
+
+# added on 21/03/2019: calculate maximum mean interannual change
+
+meanchange <- meanframe %>% mutate(
+  Meant1 = c(GM[-1], NA),
+  Growth = ((Meant1 - GM) / Meant1) * 100
+)
+
+```
+
+Mean sponge density at the studied reef (calculated as mean of the means) increased by 47% from the beginning of the survey (2005) to 2007 (Wilcoxon signed rank test p-value = 0.0001831), decreased by 63% between 2007 and 2014 (p-value = 6.104e-05), and increased again by 59% between 2014-2017 (p-value = 0.0008898). Are changes in time significant? DOes the site matter?
+
+## LMM to see the effect of time and site on sponge numbers.
+
+```{r, fig.width = 11, fig.height = 3.5}
+
+# turn years to years after 2005
+
+transData$relYear <- transData$Year - 5
+
+nullN <- nlme::lme(Total ~ 1,
+                  random = ~ 1 | QuadratSite,
+                  data = transData,
+                  correlation = corCAR1(form = ~ relYear | QuadratSite),
+                  method = "ML")
+
+timeN <- update(nullN, . ~ . + relYear)
+
+spaceN <- update(nullN, . ~ . + Site)
+
+addN <- update(timeN, . ~ . + Site)
+
+allN <- update(addN, . ~ . + relYear * Site)
+
+anova(timeN, addN) # additive effect of space and time (LRT p-value = 0.0077): site effect and time effect but time effect is the same at all sites
+
+addN <- update(addN, weights = varIdent(form = ~ 1 | QuadratSite), method = "REML") # fits variance structure
+
+summary(addN)
+
+VarCorr(addN) # intercept shows between-quadrat variation, residuals within quadrat variation
+
+jpeg("//Staff/Home/SCIFAC/rovellal/DocumentsRedir/Projects/Defense/residuals/Ch3_LMM_N_Site_Year.jpeg", width = 11, height = 3.5, units = "in", res = 300) 
+par(mfrow = c(1, 3))
+plot(resid(addN, type = "normalized"))
+hist(residuals(addN, type = "normalized"))
+qqnorm(residuals(addN, type = "normalized"))
+qqline(residuals(addN, type = "normalized"))
+dev.off()
+
+
+```
+
+Above shows that there is an effect of time (that is, years after 2005 have a significant - negative - effect on sponge abundance at all sites). The effect of time is negative, that is sponges had an overall decline over the studied period. Site B is significantly different from site A, site C is not. No comparison between site B and C but it does not really matter. Note that this likely is influenced by the peak in 2007-2008 and the low in 2014, as testing for differences between 2005 and 2017 at reef level does not show differences. Site-wise Wilcoxon rank comparisons are not possible duue to low n. There is an __additive__ effect ot time and site, but no combination of the two. That is, sponge numbers change in time and between sites but not in different ways between sites, supporting the consistency of the temporal dynamics across sites. 
+
+Test for differences in mean numbers of sponges between years of peak and low sponge abundance across sites. Use a Wilcoxon signed rank test to test for differences in the distributions. Use this test because it allows for paired samples, that is non-independent samples (necessary because these are repeated measures). The test allows to ignore the normality assumption, that would be difficult to check for even with sample size N = 15. 
+
+```{r}
+
+a5 <- transData[transData$Year == 5 & transData$Site == "A",]$Total
+a7 <- transData[transData$Year == 7 & transData$Site == "A",]$Total
+b5 <- transData[transData$Year == 5 & transData$Site == "B",]$Total
+b7 <- transData[transData$Year == 7 & transData$Site == "B",]$Total
+c5 <- transData[transData$Year == 5 & transData$Site == "C",]$Total
+c8 <- transData[transData$Year == 8 & transData$Site == "C",]$Total
+a14 <- transData[transData$Year == 14 & transData$Site == "A",]$Total
+b14 <- transData[transData$Year == 14 & transData$Site == "B",]$Total
+c14 <- transData[transData$Year == 14 & transData$Site == "C",]$Total
+a17 <- transData[transData$Year == 17 & transData$Site == "A",]$Total
+b17 <- transData[transData$Year == 17 & transData$Site == "B",]$Total
+c17 <- transData[transData$Year == 17 & transData$Site == "C",]$Total
+
+```
+
+No way a test like Shapiro-Wilk can actually be trusted to detect normality or lack thereof on such small sample size. We must rely on the Wilcoxon signed rank test, that assumes independence of the sample pairs but no normality. This is a paired test, that is it evaluates pairs of non-independent samples (thus is good for repeated measures etc).
+
+```{r}
+
+# growth
+
+wilcox.test(a5, a7, paired = T) # V = 0, p-value = 0.0625
+wilcox.test(b5, b7, paired = T) # V = 0, p-value = 0.0625
+wilcox.test(c5, c8, paired = T) # V = 0, p-value = 0.0625
+
+# decline
+
+wilcox.test(a7, a14, paired = T) # V = 15, p-value = 0.0625
+wilcox.test(b7, b14, paired = T) # V = 15, p-value = 0.0625
+wilcox.test(c8, c14, paired = T) # V = 15, p-value = 0.0625
+
+# rebound
+
+wilcox.test(a14, a17, paired = T) # V = 0, p-value = 0.0625
+wilcox.test(b14, b17, paired = T) # V = 1, p-value = 0.125
+wilcox.test(c14, c17, paired = T) # V = 0, p-value = 0.05791
+
+# start to end
+
+wilcox.test(a5, a17, paired = T) # V = 5, p-value = 0.625
+wilcox.test(b5, b17, paired = T) # V = 15, p-value = 0.0625
+wilcox.test(c5, c17, paired = T) # V = 12, p-value = 0.3125
+
+```
+
+Due to the small sample size per site per year (n = 5), detecting the shifts in the mean at the standard level of significance (0.05) is nearly impossible with a Wilcoxon test even for a pretty large change (see tables of critical values for n = 5). A paired t test would be more forgiving, but the assumption of normality cannot really be tested for due to the small sample size. Therefore, we have to accept that our sample size does not allow us to make conclusions about the significance of the within-site temporal variation. 
+
+Pool the data from all site together to see if at the site, in general, things have changed in time.
+
+```{r}
+
+tot5 <-transData[transData$Year == 5,]$Total
+tot7 <- transData[transData$Year == 7,]$Total
+tot14 <- transData[transData$Year == 14,]$Total
+tot17 <- transData[transData$Year == 17,]$Total
+
+# growth
+
+wilcox.test(tot5, tot7, paired = T) # V = 2, p-value = 0.0001831
+
+# decline
+
+wilcox.test(tot7, tot14, paired = T) # V = 120, p-value = 6.104e-05
+
+# rebound
+
+wilcox.test(tot14, tot17, paired = T) # V = 1, p-value = 0.0008898
+
+# start to end
+
+wilcox.test(tot5, tot17, paired = T) # V = 92, p-value = 0.073
+
+```
+
+Initial growth, decline and rebound see a significant shift in mean sponge abundance at the studied reef. No overall significant change in sponge abundance from the beginning to the end of the study period. 
+
+Wilcoxon rank sum test for difference between sites pooled over time. Note that here we do not need a paired test, hence the rank sum as opposed to the signed rank test.
+
+```{r}
+
+SA <- transData[transData$Site == "A",]$Total
+SB <- transData[transData$Site == "B",]$Total
+SC <- transData[transData$Site == "C",]$Total
+
+wilcox.test(SA, SB)
+wilcox.test(SA, SC)
+wilcox.test(SB, SC)
+  
+```
+
+Species mean abundances
+
+```{r}
+# updated 06/02/2019
+
+tmp <- setorder(summarised, Year, Site, variable) %>% dplyr::select(
+  variable:Sterr
+) 
+
+# drop total as we have to resum
+
+tmp <- tmp[tmp$variable != "Total",]
+
+# add species column
+
+tmp$Species <- rep(species[,3], nrow(tmp) / nrow(species))
+
+tmp <- tmp %>% group_by(
+  Year, Site
+) %>% mutate(
+  Total = sum(Mean),
+  Prop  = Mean / Total
+)
+
+tmp <- setorder(tmp, Year, Site, -Prop)
+
+list.G <- split(tmp, list(tmp$Year, tmp$Site))
+list.short <- vector(mode = "list", length = length(list.G))
+
+for (i in 1:length(list.G)) {
+  v <- 0
+  z <- 0
+  for (j in 1:nrow(list.G[[i]])) {
+    if (v < 0.9) {
+      v <- v + list.G[[i]][j, 8]
+      z <- z + 1
+    } else {
+      v <- v
+      z <- z
+    }
+  }
+  # # finally subset the original frame x taking the first z counts, which should add up to the closest possible to
+  # # the chosen percentage
+  list.short[[i]] <- list.G[[i]][1:z,]
+}
+
+short.species.means <- rbindlist(list.short)
+
+# remove OTUs
+
+short.species.means <- short.species.means[!grepl("OTU", short.species.means$Species),]
+
+# extract 3 most abundant taxa per year
+
+tmp2 <- split(short.species.means, list(short.species.means$Year, short.species.means$Site))
+tmp3 <- lapply(tmp2, function(x) x[1:5,])
+top5 <- rbindlist(tmp3)
+
+length(levels(factor(top5$Species)))
+
+ggplot(data = top5, aes(x = Species))+
+  geom_bar()
+
+```
+The above barchart illustrate the most common identified species at Buoy 3. It was calculated this way:
+
+1. Mean abundances per site per year were calculated for all species
+2. The original dataframe was reduced to the taxa making up for 90% of sponge individuals at each site each year
+3. Then the non-identified taxa were excluded, although some are abundant
+4. Finally, for each site each year the 3 most abundant identified taxa were retained
+
+The plot shows how many times these species appear among the 3 most abundant identified species per site per year.
+
+Get average proportion of the most abundant species
+
+```{r}
+
+topspecies <- top5 %>% group_by(
+  Species
+) %>% summarise(
+  Mean.Prop = mean(Prop)
+)
+
+topspecies
+
+```
+
+
+```{r}
+
+summarised.by.species <- setorder(summarised, variable, Year, Site)
+
+all.taxa.frame <- summarised.by.species %>% group_by(
+  variable, Year
+  ) %>% mutate(
+  GM   = mean(Mean, na.rm = T), # Grand mean per year
+  Var  = (Sterr * sqrt(5))^2, # get variance
+  ESSG = Var * (5-1), # Error Sum of Squares within Group: V(i) * (n(i)-1)
+  GSS  = (Mean - GM)^2 * 5 # Group Sum of Squares
+  ) %>% group_by(
+  variable, Year
+) %>% mutate(
+  ESS   = sum(ESSG), # error sum of squares: add ESSG up for all groups year by year
+  TGSS  = sum(GSS), # Get Group sum of Squares
+  GV    = (ESS + TGSS) / (15-1), # N = 15-1 because it calls for total number of observations. This is the Grand Variance
+  GSD   = sqrt(GV),
+  Gupper = GM + GSD, # write intervals for plot
+  Glower = GM - GSD
+) %>% ungroup()
+
+# clean things up and keep a dataset of the grand mean and grand sd for each species
+
+clean.species <- all.taxa.frame %>% dplyr::select(
+  variable, Year, GM, GSD, Gupper, Glower
+) %>% group_by(
+  variable, Year
+) %>% summarise(
+  GM = mean(GM),
+  GSD = mean(GSD),
+  Glower = mean(Glower),
+  Gupper = mean(Gupper)
+)
+
+# add species vector: get rid of total, reorder and bind
+
+clean.species <- clean.species[clean.species$variable != "Total",]
+
+clean.species <- setorder(clean.species, Year, variable)
+
+clean.species$Species <- rep(species[,3], nrow(clean.species) / nrow(species))
+
+```
+
+Get maxima and minima of mean sponge abundance.
+
+```{r}
+
+species.abvs <- read.csv("//Staff/Home/SCIFAC/rovellal/DocumentsRedir/Projects/Chapter1/analysis/taxa25.csv")[,c(3,4)]
+
+long.t.means <- long.t[c(1:(nrow(long.t)-11*3*5)),]
+long.t.means$Taxon <- rep(speciesOrDescription, each = 11*3*5)
+
+long.means <- long.t.means %>% group_by(
+  Taxon
+) %>% summarise(
+  Min = min(value),
+  Max = max(value),
+  Mean = mean(value),
+  SE = sd(value) / sqrt(length(value))
+)
+
+means.25 <- long.means[long.means$Taxon %in% species.abvs$xR1,]
+
+```
+
+
+```{r}
+
+library(ggforce)
+
+mean.no.otu <- long.t.means %>% group_by(
+  Year, Taxon, Site
+) %>% summarise(
+  Mean = mean(value),
+  SE   = sd(value) / sqrt(length(value)),
+  upper = Mean + SE
+)
+
+mean.no.otu <- mean.no.otu[!grepl("OTU", mean.no.otu$Taxon),]
+
+mean.no.otu <- mean.no.otu[mean.no.otu$Taxon %in% species.abvs$xR1,]
+
+taxa <- levels(droplevels(mean.no.otu$Taxon))
+
+for (i in seq_len(length(taxa))) {
+  pi <- ggplot(data = mean.no.otu[mean.no.otu$Taxon == taxa[i],], aes(x = Year, y = Mean))+
+    geom_bar(stat = "identity", position = "stack")+
+    geom_errorbar(aes(ymin = Mean, ymax = upper + 0.001), width = .2)+
+    scale_x_continuous(breaks = seq(5,17,1),
+                       labels = seq(2005,2017,1),
+                       limits = c(4,18))+
+    labs(y=expression(paste(Sponge~abundance~(sponge~patches~m^2))))+
+    theme_bw()+
+    theme(panel.grid.minor = element_blank(),
+          panel.grid.major = element_blank())+
+    theme(plot.title = element_text(size=14, vjust=2))+
+    theme(axis.title.x = element_text(size=10,vjust=-0.5),
+          axis.title.y = element_text(size=10,vjust=0.5))+
+    theme(axis.text.x=element_text(size=9, angle = 60, 
+                                   hjust = 1, vjust = .9))+
+    theme(axis.text.y=element_text(size=10))+
+    facet_grid(Taxon ~ Site)
+  ggsave(paste("//Staff/Home/SCIFAC/rovellal/DocumentsRedir/Projects/Chapter1/analysis/speciesSUPP/taxon", i, "dynamics.pdf", sep = ""),
+         pi, width = 8, height = 2.55)
+}
+
+```
+
+Plot species dynamics, bars will be fine
+
+```{r}
+
+library(ggforce)
+
+species.for.plot <- clean.species[!grepl("OTU", clean.species$Species),]
+
+n_pages <- ceiling(length(levels(droplevels(species.for.plot$Species))) / 15)
+
+for (i in seq_len(n_pages)) {
+  pi <- ggplot(data = species.for.plot, aes(x = Year, y = GM))+
+    geom_bar(stat = "identity", position = "stack")+
+    geom_errorbar(aes(ymin = GM, ymax = Gupper), width = .2)+
+    scale_x_continuous(breaks = seq(5,17,1),
+                       labels = seq(2005,2017,1),
+                       limits = c(4,18))+
+    # scale_y_continuous(limits = c(0,180),
+    #                    breaks = seq(0,180,20))+
+    #scale_fill_manual(values = getPalette(nOfColors))+
+    labs(y=expression(paste(N~(sponges~m^2))))+
+    theme_bw()+
+    theme(panel.grid.minor = element_blank(),
+          panel.grid.major = element_blank())+
+    theme(plot.title = element_text(size=14, vjust=2))+
+    theme(axis.title.x = element_text(size=10,vjust=-0.5),
+          axis.title.y = element_text(size=10,vjust=0.5))+
+    theme(axis.text.x=element_text(size=9, angle = 60, 
+                                   hjust = 1, vjust = .9))+
+    theme(axis.text.y=element_text(size=10))+
+    facet_wrap_paginate(~ Species, scales = "free", ncol = 3, nrow = 5, page = i)
+  ggsave(paste("//Staff/Home/SCIFAC/rovellal/DocumentsRedir/Projects/Chapter1/analysis/", i, "dynamics2017_MEPS.png", sep = ""),
+         pi, width = 8, height = 11)
+}
+
+```
+
+# Per-capita growth
+
+```{r}
+
+transData$Nprev <- c(rep(NA, nrow(transData[transData$Year == 5,])),
+                      transData$Total[(transData$Year != 17)]) # gets a column with N previous year
+
+adjacentYears <- c(6:9, 14:17)
+smallFramePlot <- transData[transData$Year %in% adjacentYears,]
+smallFramePlot$Year <- factor(as.character(smallFramePlot$Year), levels = unique(smallFramePlot$Year))
+dummyFrame <- smallFramePlot[,c(1,2,)]
+dummyFrame$Year <- as.factor(as.character(dummyFrame$Year))
+
+```
+
+```{r, fig.width = 8, fig.height = 3.5}
+
+spongesInTime <- ggplot(data = smallFramePlot, 
+                        aes(x = Nprev, y = Total, group = Year))+
+  geom_point(data = dummyFrame, color = "grey90")+
+  geom_point(aes(shape = Year), size = 2)+
+  scale_shape_manual(values = 1:8)+
+  geom_abline(intercept = 0, slope = 1, color = "grey90")+
+  scale_x_continuous(breaks = seq(0,350,100),
+                     labels = seq(0,350,100),
+                     limits = c(0,350))+
+  scale_y_continuous(limits = c(0,350),
+                     breaks = seq(0,350,100))+
+  labs(x="N(t)", y="N(t+1)")+
+  #geom_smooth(method = "lm")+
+  theme_bw()+
+  theme(panel.grid.minor = element_blank(), 
+        panel.grid.major = element_blank())+
+  theme(plot.title = element_text(size=14, vjust=2))+
+  theme(axis.title.x = element_text(size=10,vjust=-0.5),
+        axis.title.y = element_text(size=10,vjust=0.5))+
+  theme(axis.text.x=element_text(size=10, vjust = .9))+
+  theme(axis.text.y=element_text(size=10))+
+  facet_grid(. ~ Site)+
+  theme(strip.text.x = element_blank(), strip.background = element_blank())
+
+spongesInTime
+
+# ggsave("//Staff/Home/SCIFAC/rovellal/DocumentsRedir/Projects/Chapter 1/pics/ntvsnt12017.pdf",
+#        spongesInTime, useDingbats = T, width = 9.6, height = 3.5)
+
+```
+
+# Assemblage composition analysis
+
+Combination of nMDS and PCA with PERMANOVA or NPMANOVA, operating on a Bray-Curtis matrix.
+
+```{r}
+
+# option to apply chainsaw fucntion to the original dataframe and get the species and then subset that one
+
+dataReps <- cbind(speciesOrDescription, dataAllYears)
+
+sortedReps <- list()
+for (i in 1:length(dataReps)) {
+  sortedReps[[i]] <- dataReps[order(dataReps[,i], decreasing = T),]
+  sortedReps[[i]] <- sortedReps[[i]][,c(1,i)]
+}
+
+sortedReps <- sortedReps[-1]
+
+# function to cut rare taxa
+
+chainsaw <- function(x, percent) {
+  # first it needs to calculate the sum of the numbers
+  sumOfNumbers <- sum(x[,2])
+  # then calculate n as in n = sumOfNumbers*domPerc / 100
+  n = sumOfNumbers * percent / 100
+  # # then count how many elements of x[,2] are needed to go as big as n, where the count is z
+  v <- 0
+  z <- 0
+  for (i in 1:nrow(x)) {
+    if (v < n) {
+      v <- v + x[i,2]
+      z <- z + 1
+    } else {
+      v <- v
+      z <- z
+    }
+  }
+  # # finally subset the original frame x taking the first z counts, which should add up to the closest possible to
+  # # the chosen percentage
+  y <- x[1:z,]
+  return(y)
+  
+}
+
+dominantPerQuad <- lapply(sortedReps, chainsaw, 100) # considering all species here, not cutting
+
+# get species 
+
+speciesSetReps <- factor(levels(factor(unlist(lapply(dominantPerQuad, function(x) as.character(x[,1]))))))
+
+# now use it to subset the meanDataFrame, which must be entry for barchart
+
+subsetReps <- dataReps[dataReps[,1] %in% speciesSetReps,] 
+
+replicates <- subsetReps[,-1] 
+
+```
+
+##nMDS
+
+The below calls for a community matrix as input. For the package *vegan*, this matrix needs to have rows = QuadratSite and columns = Species, thus we need to transpose our data.
+
+```{r}
+
+# first transpose and renames columns
+
+transposedReps <- t(replicates)
+
+colnames(transposedReps) <- speciesOrDescription[as.numeric(rownames(replicates))]
+
+# now structure is N as rows and species as columns
+
+transReps <- log(transposedReps+1) # log-transform
+
+repBC <- vegdist(transReps, method = "bray")
+
+```
+
+Not evaluating when knitting, this figures out the number of dimensions one should use.
+
+```{r, eval = FALSE}
+
+#################### scree diagram ###############################
+
+# following region is to determine how many dimensions are optimal for the MDS plot. chosen criterion is: when does the stress fall below 0.05? I found that referred to as when k is optimal for the MDS iterations. k = 2 or 3 is typical, increasing by 1 is deemedacceptable in the package help. k = 4 yields stress < .2, which is deemd as "fair". Qualitatively, there is minimal difference among the number of dimensions, so 4 might be a good justifiable middle ground
+
+dim <- 10
+stressList <- vector(mode = "list", length = length(dim))
+
+for (i in 1:dim) {
+  fitTemp <- metaMDS(repBC, k = i, engine = "monoMDS", try = 20, trymax = 50, autotransform = F)
+  stressList[[i]] <- fitTemp$stress
+}
+
+stressVec <- unlist(stressList)
+
+screeFrame <- data.frame(1:10, stressVec)
+
+scree <- ggplot(data = screeFrame, aes(x = X1.10, y = stressVec))+
+  geom_point()+
+  geom_abline(intercept = 0.2, slope = 0, colour = "red")
+scree
+
+```
+
+Non-metric MDS below. k = 4 from above, it sets the stress at 0.16, which I have found to be referred to as between "good" and "fair" (< .2).
+
+```{r}
+
+fit <- metaMDS(repBC, k = 4, engine = "monoMDS", trymax = 100, try = 20, autotransform = F) # this is a ***NON-METRIC*** MDS plot based on Bray-Curtis dissimilarity.
+
+distances <- as.data.frame(fit$points)
+distances$Names <- as.character(rownames(distances))
+
+for (i in 1:nrow(distances)) {
+  distances$Year[i] <- paste("20", substr(distances$Names[i], 1, 2), sep = "")
+}
+for (i in 1:nrow(distances)) {
+  distances$Site[i] <- substr(distances$Names[i], nchar(distances$Names[i])-1, nchar(distances$Names[i])-1)
+}
+for (i in 1:nrow(distances)) {
+  distances$Quadrat[i] <- substr(distances$Names[i], nchar(distances$Names[i]), nchar(distances$Names[i]))
+}
+
+# plot
+
+distancesMDS <- distances
+distancesMDS$Year <- c(rep(5,15), rep(6,15), rep(7,15), rep(8, 15), rep(9, 15),
+                       rep(11, 15), rep(13, 15), rep(14, 15), rep(15,15), rep(16,15), rep(17, 15))
+
+
+```
+
+```{r, fig.width = 6, fig.height = 5}
+
+MDSplotBW <- ggplot(data = distancesMDS, aes(x = MDS1, y = MDS2, colour = Site))+
+  # geom_hline(yintercept = 0, linetype = "dashed")+
+  # geom_vline(xintercept = 0, linetype = "dashed")+
+  geom_point(aes(fill = Site, shape = factor(Year)), size = 1.5, stroke = 0.8)+
+  scale_shape_manual(values = 0:11)+
+  scale_color_manual(values = c("grey40", "darkblue", "coral"))+ 
+  labs(x = "MDS1", y = "MDS2")+
+  theme_bw()+
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor.y = element_blank())#,
+    # axis.text.x=element_blank(),
+    # axis.ticks.x=element_blank(),
+    # axis.text.y=element_blank(),
+    # axis.ticks.y=element_blank())
+MDSplotBW
+
+ggsave("//Staff/Home/SCIFAC/rovellal/DocumentsRedir/Projects/Chapter1/analysis/newpics/MDS_MEPS.pdf",
+       MDSplotBW, useDingbats = T, width = 4.5, height = 3.5)
+
+```
+
+Annual MDS for Supplementary Information
+
+
+```{r, fig.width = 8, fig.height = 7}
+
+MDSplotBW <- ggplot(data = distancesMDS, aes(x = MDS1, y = MDS2, group = Site))+
+  # geom_hline(yintercept = 0, linetype = "dashed")+
+  # geom_vline(xintercept = 0, linetype = "dashed")+
+  geom_point(aes(color = Site), size = 1.5, stroke = 1.2)+
+  scale_color_manual(values = c("coral", "blue3", "grey50"))+
+  labs(x = "MDS1", y = "MDS2")+
+  theme_bw()+
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor.y = element_blank())+
+  facet_wrap(~ Year, nrow = 3)
+  #,
+    # axis.text.x=element_blank(),
+    # axis.ticks.x=element_blank(),
+    # axis.text.y=element_blank(),
+    # axis.ticks.y=element_blank())
+MDSplotBW
+
+ggsave("//Staff/Home/SCIFAC/rovellal/DocumentsRedir/Projects/Chapter1/analysis/newpics/MDS_MEPS_SUPP.pdf",
+       MDSplotBW, useDingbats = T, width = 8, height = 7)
+
+```
+
+##CAP
+
+```{r}
+
+# CAP starts from the species list
+
+# need to build a dummy frame
+
+dummyMatrix <- as.data.frame(cbind(distances$Year, distances$Site, distances$Quadrat))
+colnames(dummyMatrix) <- c("Year", "Site", "Quadrat")
+rownames(dummyMatrix) <- rownames(transReps)
+
+# different formulas mean different ordinations, depending on the included variables
+
+CAPall <- capscale(transReps ~ Year + Site + Year*Site, dummyMatrix, distance = "bray", add = T)
+
+components <- fortify(CAPall) # extract the coordinates from the cca objects calculated with capscale 
+components <- data.frame(lapply(components, function(x) {
+  x <- gsub("Year", "", x)
+  x <- gsub("Site", "", x)
+  x <- gsub("Mean", "", x)
+  return(x)
+}))
+
+components$Dim1 <- as.numeric(as.character(components$Dim1))
+components$Dim2 <- as.numeric(as.character(components$Dim2))
+components$Label <- gsub("spe", "", components$Label)
+
+# plotting region
+
+plotData <- subset(components, components$Score != "biplot" & components$Score != "constraints" & components$Score != "sites")
+
+plotData$ColorKey <- c(rep("Species", nrow(plotData[plotData$Score=="species",])), rep("Year", 11), rep("Site", 3)) 
+
+# fix levels
+
+plotData$ColorKey <- factor(plotData$ColorKey, levels = unique(plotData$ColorKey))
+
+#################################################
+
+# optional: subset dataframe to 25 most abundant identified species: completely arbitrary, but necessary for visualisation
+
+species.abvs <- read.csv("//Staff/Home/SCIFAC/rovellal/DocumentsRedir/Projects/Chapter1/analysis/taxa25.csv")[,c(3,4)]
+species.abvs$y <- as.character(species.abvs$y)
+
+plotData.subset <- rbind(plotData[plotData$Label %in% species.abvs$xR1,],
+                         plotData[plotData$ColorKey == "Year",],
+                         plotData[plotData$ColorKey == "Site",])
+
+for (i in 1:nrow(plotData.subset)) {
+  if (plotData.subset$Label[i] %in% species.abvs$x) {
+    plotData.subset$Label[i] <- species.abvs$y[which(species.abvs$x == plotData.subset$Label[i])]
+  }
+}
+
+drop.otu <- plotData.subset[substr(plotData.subset$Label, 1, 1) != "O",]
+
+# add column with numbers
+
+drop.otu$plotnums <- c(1:nrow(drop.otu[drop.otu$ColorKey == "Species",]), drop.otu[drop.otu$ColorKey != "Species",]$Label)
+
+```
+
+```{r, fig.width = 6, fig.height = 5}
+
+CAPplot <- ggplot(data = drop.otu[drop.otu$ColorKey != "Year",], aes(x = Dim1, y = Dim2, group = ColorKey))+
+  geom_hline(yintercept = 0, linetype = "dashed")+
+  geom_vline(xintercept = 0, linetype = "dashed")+
+  geom_segment(data = subset(drop.otu, drop.otu$Score == "species"),
+               aes(x = 0, xend = Dim1, y = 0, yend = Dim2), color = "grey60", size = 0.1)+#,
+               #arrow = arrow(length = unit(0.1, 'cm')))+
+  geom_text(aes(label = Label, color = ColorKey, size = ColorKey))+
+  geom_point(data = plotData.subset[plotData.subset$ColorKey == "Year",], aes(x = Dim1, y = Dim2), color = "blue", size = 2)+
+  # scale_color_manual(values = c("grey50", "black", "grey30"))+
+  # color
+  scale_color_manual(values = c("grey10", "red"))+
+  scale_size_manual(values = c(3,5))+
+  theme_bw()+
+  labs(x = "CAP1", y = "CAP2")+
+  # scale_x_continuous(limits = c(-1,1))+
+  # scale_y_continuous(limits = c(-1,1))+
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor.y = element_blank())
+CAPplot
+
+ggsave("//Staff/Home/SCIFAC/rovellal/DocumentsRedir/Projects/Chapter1/analysis/newpics/CAP_MEPS.pdf",
+       CAPplot, useDingbats = T, width = 4.5, height = 3.5)
+
+```
+
+## Permutational MANOVA
+
+```{r}
+
+adonis(transReps ~ Year + Site + Year * Site, data = dummyMatrix, permutations = 9999, method = "bray") # Do not forget the combination
+
+```
+
